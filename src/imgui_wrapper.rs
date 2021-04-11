@@ -10,6 +10,8 @@ use imgui_gfx_renderer::{Renderer, RendererError, Shaders};
 
 use std::time::Instant;
 
+use crate::MenuState;
+
 #[derive(Copy, Clone, PartialEq, Debug, Default)]
 struct MouseState {
 	pos: (i32, i32),
@@ -101,7 +103,7 @@ impl ImGuiWrapper {
 		}
 	}
 
-	pub fn render<'a, F: FnMut(&mut Ui) + 'a>(&mut self, ctx: &mut Context, hidpi_factor: f32, mut run_ui: F) -> Result<(), RendererError> {
+	pub fn render<'a, F: FnMut(&mut Ui, &mut MenuState) + 'a>(&mut self, ctx: &mut Context, hidpi_factor: f32, state: &mut MenuState, mut run_ui: F) -> Result<(), RendererError> {
 		// Update mouse
 		self.update_mouse();
 
@@ -118,7 +120,7 @@ impl ImGuiWrapper {
 		self.imgui.io_mut().font_global_scale = (1.0 / hidpi_factor) as f32;
 
 		let mut ui = self.imgui.frame();
-		run_ui(&mut ui);
+		run_ui(&mut ui, state);
 
 		// Render
 		let (factory, _, encoder, _, render_target) = graphics::gfx_objects(ctx);

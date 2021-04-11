@@ -1,18 +1,24 @@
 extern crate rand;
 extern crate ggez;
+extern crate winit;
 
 mod imgui_wrapper;
+mod colors;
+mod color_tube;
 
-use crate::imgui_wrapper::ImGuiWrapper;
 use imgui::*;
-use ggez::conf;
+use ggez::{input, mint, nalgebra, Context, ContextBuilder, GameResult};
+use ggez::conf::{self, NumSamples};
 use ggez::event::{self, EventHandler, KeyCode, KeyMods, MouseButton};
-use ggez::graphics::{self, Drawable, Font, Color, Scale, Mesh, DrawMode, DrawParam, BlendMode, Rect, Text, TextFragment};
-use ggez::nalgebra as alg;
-use alg::{Vector2, Point2};
-use ggez::{Context, GameResult};
+use ggez::graphics::{self, Drawable, Font, Scale, DrawParam, Text, TextFragment};
+use nalgebra::Point2;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
+use crate::imgui_wrapper::ImGuiWrapper;
+use crate::colors::*;
+use crate::color_tube::{ColorTube, ColorTubeContent};
+
+// TODO: persist settings on filesystem
 
 fn smallest_factor(mut n: usize) -> usize {
 	let mut out = vec![];
@@ -26,242 +32,43 @@ fn smallest_factor(mut n: usize) -> usize {
 	out.into_iter().min().unwrap_or(n)
 }
 
+const WINDOW_WIDTH: f32 = 700.0;
+const WINDOW_HEIGHT: f32 = 650.0;
 
 const TUBE_WIDTH: f32 = 50.0;
 const SCREEN_MARGIN: f32 = 50.0;
 const TUBE_MARGIN: f32 = 25.0;
 
-const COLOR_PINK: Color = Color::new(0.8823529411764706, 0.12941176470588237, 0.7098039215686275, 1.0);
-const COLOR_PURPLE: Color = Color::new(0.6549019607843137, 0.17647058823529413, 0.8666666666666667, 1.0);
-const COLOR_VIOLET: Color = Color::new(0.3843137254901961, 0.2, 0.8274509803921568, 1.0);
-const COLOR_BLUE: Color = Color::new(0.050980392156862744, 0.08627450980392157, 0.49019607843137253, 1.0);
-const COLOR_LIGHTBLUE: Color = Color::new(0.2235294117647059, 0.27058823529411763, 0.8313725490196079, 1.0);
-const COLOR_CYAN: Color = Color::new(0.1411764705882353, 0.8705882352941177, 0.8705882352941177, 1.0);
-const COLOR_GREEN: Color = Color::new(0.043137254901960784, 0.396078431372549, 0.07058823529411765, 1.0);
-const COLOR_LIGHTGREEN: Color = Color::new(0.1803921568627451, 0.7803921568627451, 0.2235294117647059, 1.0);
-const COLOR_OLIVE: Color = Color::new(0.5686274509803921, 0.7254901960784313, 0.08235294117647059, 1.0);
-const COLOR_YELLOW: Color = Color::new(0.8235294117647058, 0.803921568627451, 0.16470588235294117, 1.0);
-const COLOR_ORANGE: Color = Color::new(0.8117647058823529, 0.44313725490196076, 0.17647058823529413, 1.0);
-const COLOR_RED: Color = Color::new(0.796078431372549, 0.1568627450980392, 0.1450980392156863, 1.0);
-
-const COLOR_BG: Color = Color::new(0.125, 0.125, 0.125, 1.0);
-const COLOR_TUBE_BORDER: Color = Color::new(0.5, 0.5, 0.5, 1.0);
-const COLOR_TUBE_BORDER_HOVER: Color = Color::new(1.0, 1.0, 1.0, 1.0);
-const COLOR_TUBE_BORDER_FOCUS: Color = COLOR_LIGHTBLUE;
-
-#[derive(Debug, Clone, PartialEq)]
-struct ColorTubeContent {
-	color: Color,
-	amount: f32,
+struct Settings {
+	full_screen: bool,
 }
 
-impl ColorTubeContent {
-	fn new(color: Color, amount: f32) -> Self {
-		Self{ color, amount }
-	}
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct ColorTube {
-	hovered: bool,
-	mousedown: bool,
-	mouseup: bool,
-	dimensions: Rect,
-	capacity: f32,
-	contents: Vec<ColorTubeContent>,
-	font: Font,
-}
-
-impl ColorTube {
-	fn new(capacity: f32, contents: Vec<ColorTubeContent>, font: Font) -> Self {
+impl Settings {
+	fn new() -> Self {
 		Self {
-			hovered: false,
-			mousedown: false,
-			mouseup: false,
-			dimensions: Rect::new(0.0, 0.0, 50.0, 50.0 * capacity),
-			capacity,
-			contents,
-			font
+			full_screen: false
 		}
-	}
-
-	fn amount(&self) -> f32 {
-		self.contents.iter().map(|c| c.amount).sum()
-	}
-
-	fn remaining_capacity(&self) -> f32 {
-		self.capacity - self.amount()
-	}
-
-	fn main_color(&self) -> Option<Color> {
-		let mut occurrences = std::collections::HashMap::new();
-		for content in &self.contents {
-			*occurrences.entry(content.color.to_rgb_u32()).or_insert(0) += content.amount.floor() as u32;
-		}
-		occurrences
-			.into_iter()
-			.max_by_key(|&(_, count)| count)
-			.map(|(val, _)| Color::from_rgb_u32(val))
-	}
-
-	// returns 0.0 (0%) .. 1.0 (100%)
-	fn color_pct(&self, color: Color) -> f32 {
-		let mut amount = 0.0;
-		for content in &self.contents {
-			if content.color == color {
-				amount += content.amount;
-			}
-		}
-		(amount / self.capacity - self.remaining_capacity() / self.capacity - (self.amount() - self.remaining_capacity() - amount) / self.capacity).max(0.0).min(1.0)
-	}
-
-	// returns 0.0 (0%) .. 1.0 (100%)
-	fn complete_pct(&self) -> f32 {
-		if let Some(color) = self.main_color() {
-			self.color_pct(color)
-		} else {
-			1.0
-		}
-	}
-
-	fn fill_unchecked(&mut self, content: ColorTubeContent) -> Option<ColorTubeContent> {
-		if self.remaining_capacity() < content.amount {
-			return Some(content);
-		}
-		let count = self.contents.len();
-		if count == 0 || self.contents[count - 1].color != content.color {
-			self.contents.push(content);
-		} else {
-			self.contents[count - 1].amount += content.amount;
-		}
-		None
-	}
-
-	fn fill(&mut self, content: ColorTubeContent) -> Option<ColorTubeContent> {
-		if self.remaining_capacity() < content.amount {
-			return Some(content);
-		}
-		let count = self.contents.len();
-		if count == 0 {
-			self.contents.push(content);
-		} else if self.contents[count - 1].color == content.color {
-			self.contents[count - 1].amount += content.amount;
-		} else {
-			return Some(content);
-		}
-		None
-	}
-
-	fn drain(&mut self, mut amount: f32) -> Option<ColorTubeContent> {
-		if amount > self.amount() {
-			amount = self.amount();
-		}
-		if amount <= 0.0 {
-			return None;
-		}
-		if let Some(mut content) = self.contents.pop() {
-			if amount > content.amount {
-				amount = content.amount;
-			}
-			if amount <= 0.0 {
-				self.contents.push(content);
-				return None;
-			}
-			if content.amount == amount {
-				return Some(content);
-			} else {
-				content.amount -= amount;
-				let new_content = ColorTubeContent::new(content.color, amount);
-				self.contents.push(content);
-				return Some(new_content);
-			}
-		}
-		None
 	}
 }
 
-impl Drawable for ColorTube {
-	fn draw(&self, ctx: &mut Context, param: DrawParam) -> GameResult {
-		let scale = 1.0;
-		let w_scaled = self.dimensions.w * scale;
-		let w_inner_scaled = (self.dimensions.w - 1.0) * scale;
-		let w_half = (w_scaled / 2.0).floor();
-		let h_scaled = self.dimensions.h * scale;
-		let mut color_border = if self.mouseup {
-			COLOR_TUBE_BORDER_FOCUS
-		} else if self.hovered || self.mousedown {
-			COLOR_TUBE_BORDER_HOVER
-		} else {
-			COLOR_TUBE_BORDER
-		};
-		if self.mousedown {
-			color_border.a = 0.5;
+pub struct MenuState {
+	settings: Settings,
+	show_settings: bool,
+	full_screen_changed: bool,
+	skip_level: bool,
+	quit: bool,
+}
+
+impl MenuState {
+	fn new() -> Self {
+		Self {
+			settings: Settings::new(),
+			full_screen_changed: false,
+			show_settings: false,
+			skip_level: false,
+			quit: false,
 		}
-
-		// Draw fill
-		let mut filled_amount = 0.0;
-		for content in &self.contents {
-			let total_amount = filled_amount + content.amount;
-			let fill_startx = self.dimensions.x + 1.0;
-			let fill_starty = self.dimensions.y + h_scaled - w_scaled * total_amount;
-			let fill_h = w_scaled * content.amount;
-			if filled_amount < 0.5 {
-				// Draw fill with rounded bottom
-				let mut fill_points = Vec::new();
-				if content.amount >= 0.5 {
-					fill_points.push(Point2::new(fill_startx, fill_starty));
-				}
-				if content.amount > 0.0 {
-					let steps = (w_scaled / 4.0).floor() as u32;
-					for i in 0..=steps {
-						let step_x = fill_startx + (i as f32 / steps as f32) * w_inner_scaled;
-						let step_y = fill_starty + fill_h - w_half + (i as f32 * std::f32::consts::PI / steps as f32).sin() * w_half;
-						if step_y >= fill_starty {
-							fill_points.push(Point2::new(step_x, step_y));
-						}
-					}
-				}
-				if content.amount >= 0.5 {
-					fill_points.push(Point2::new(self.dimensions.x + w_inner_scaled, fill_starty));
-				}
-				if fill_points.len() >= 3 {
-					Mesh::new_polygon(ctx, DrawMode::fill(), &fill_points, content.color)?.draw(ctx, param)?;
-				}
-			} else {
-				// Draw normal square fill
-				Mesh::new_rectangle(ctx, DrawMode::fill(), Rect{
-					x: fill_startx,
-					y: fill_starty,
-					w: w_inner_scaled,
-					h: fill_h
-				}, content.color)?.draw(ctx, param)?;
-			}
-			filled_amount = total_amount;
-		}
-
-		// Draw border
-		let mut border_points = Vec::new();
-		let steps = (w_scaled / 4.0).floor() as u32;
-		border_points.push(Point2::new(self.dimensions.x, self.dimensions.y));
-		for i in 0..=steps {
-			border_points.push(Point2::new(self.dimensions.x + (i as f32 / steps as f32) * w_scaled, self.dimensions.y + h_scaled - w_half + (i as f32 * std::f32::consts::PI / steps as f32).sin() * w_half));
-		}
-		border_points.push(Point2::new(self.dimensions.x + w_scaled, self.dimensions.y));
-		Mesh::new_polygon(ctx, DrawMode::stroke(2.0), &border_points, color_border)?.draw(ctx, param)?;
-
-		// Draw completed text
-		let mut pcttext = Text::new(format!("{}%", (self.complete_pct() * 100.0).floor()));
-		pcttext.set_font(self.font, Scale::uniform(18.0));
-		let pcttext_h = pcttext.height(ctx) as f32;
-		let pcttext_w = pcttext.width(ctx) as f32;
-		graphics::queue_text(ctx, &pcttext, Point2::new(self.dimensions.x + (self.dimensions.w / 2.0 - pcttext_w / 2.0), self.dimensions.y - pcttext_h), Some(color_border));
-
-		Ok(())
 	}
-
-	fn dimensions(&self, _ctx: &mut Context) -> Option<Rect> { Some(self.dimensions) }
-	fn set_blend_mode(&mut self, _mode: Option<BlendMode>) {}
-	fn blend_mode(&self) -> Option<BlendMode> { None }
 }
 
 struct MainState {
@@ -270,16 +77,52 @@ struct MainState {
 	font: Font,
 	width: f32,
 	height: f32,
-	mouse_x: f32,
-	mouse_y: f32,
+	mouse_pos: mint::Point2<f32>,
+	menu_state: MenuState,
+
+	pre_full_screen_pos: winit::dpi::LogicalPosition,
+	pre_full_screen_size: (f32, f32),
+	full_screen_bug_reset_window_scale: bool,
+	full_screen_bug_reset_window_pos: bool,
 
 	tube_capacity: f32,
 	tubes: Vec<ColorTube>,
 	tubes_factor: usize,
 	selected_tube: Option<usize>,
+
+	level: usize,
 }
 
 impl MainState {
+	fn new(mut ctx: &mut Context, hidpi_factor: f32) -> GameResult<MainState> {
+		let imgui_wrapper = ImGuiWrapper::new(&mut ctx);
+		let (width, height) = graphics::drawable_size(ctx);
+
+		let mut s = MainState {
+			imgui_wrapper,
+			hidpi_factor,
+			font: Font::new_glyph_font_bytes(ctx, include_bytes!("../IBMPlexMono-Regular.ttf"))?,
+			width,
+			height,
+			mouse_pos: input::mouse::position(ctx),
+			menu_state: MenuState::new(),
+
+			pre_full_screen_pos: winit::dpi::LogicalPosition::new(0.0, 0.0),
+			pre_full_screen_size: (WINDOW_WIDTH, WINDOW_HEIGHT),
+			full_screen_bug_reset_window_scale: false,
+			full_screen_bug_reset_window_pos: false,
+
+			tube_capacity: 4.0,
+			tubes: Vec::new(),
+			tubes_factor: 1,
+			selected_tube: None,
+
+			level: 1,
+		};
+		s.new_tubes();
+		Ok(s)
+	}
+
 	fn new_tubes(&mut self) {
 		let mut tubes_src = vec![
 			ColorTube::new(self.tube_capacity, vec![ColorTubeContent::new(COLOR_PINK, self.tube_capacity)], self.font),
@@ -334,31 +177,64 @@ impl MainState {
 			.sum::<f32>() / (self.tubes.len() - empty_tubes) as f32
 	}
 
-	fn new(mut ctx: &mut Context, hidpi_factor: f32) -> GameResult<MainState> {
-		let imgui_wrapper = ImGuiWrapper::new(&mut ctx);
-		let mouse_pos = ggez::input::mouse::position(ctx);
-		let (width, height) = ggez::graphics::drawable_size(ctx);
-		let font = Font::new_glyph_font_bytes(ctx, include_bytes!("../IBMPlexMono-Regular.ttf"))?;
-		let mut s = MainState {
-			imgui_wrapper,
-			hidpi_factor,
-			font,
-			width,
-			height,
-			mouse_x: mouse_pos.x,
-			mouse_y: mouse_pos.y,
-			tube_capacity: 4.0,
-			tubes: Vec::new(),
-			tubes_factor: 1,
-			selected_tube: None,
-		};
-		s.new_tubes();
-		Ok(s)
+	fn skip_level(&mut self) {
+		self.level += 1;
+		self.new_tubes();
 	}
 }
 
 impl EventHandler for MainState {
 	fn update(&mut self, ctx: &mut Context) -> GameResult<()> {
+		// Handle menu state
+		if self.menu_state.quit {
+			self.menu_state.quit = false;
+			event::quit(ctx);
+			return Ok(());
+		}
+		if self.menu_state.skip_level {
+			self.menu_state.skip_level = false;
+			self.skip_level();
+		}
+
+		let win = graphics::window(ctx);
+		let current_monitor = win.get_current_monitor();
+		let monitor_dpi_factor = current_monitor.get_hidpi_factor();
+		let monitor_size = current_monitor.get_dimensions().to_logical(monitor_dpi_factor);
+		if self.menu_state.full_screen_changed {
+			self.full_screen_bug_reset_window_scale = true;
+
+			if self.menu_state.settings.full_screen {
+				self.pre_full_screen_pos = win.get_position()
+					.unwrap_or(winit::dpi::LogicalPosition::new(0.0, 0.0));
+
+				graphics::set_fullscreen(ctx, conf::FullscreenType::Desktop)?;
+				graphics::set_drawable_size(ctx, monitor_size.width as f32, monitor_size.height as f32)?;
+			} else {
+				graphics::set_fullscreen(ctx, conf::FullscreenType::Windowed)?;
+				let (size_w, size_h) = self.pre_full_screen_size;
+				graphics::set_drawable_size(ctx, size_w, size_h)?;
+			}
+		} else if self.full_screen_bug_reset_window_scale {
+			self.full_screen_bug_reset_window_scale = false;
+			self.full_screen_bug_reset_window_pos = true;
+
+			// workaround for ggez(?) bug, where:
+			// - window is not always correct size when entering fullscreen mode
+			win.set_maximized(self.menu_state.settings.full_screen);
+		} else if self.full_screen_bug_reset_window_pos {
+			self.full_screen_bug_reset_window_pos = false;
+
+			// workaround for ggez(?) bug, where:
+			// - window can be slightly offset after entering fullscreen mode
+			// - title bar is out of view after restoring to windowed mode
+			win.set_position(if self.menu_state.settings.full_screen {
+				current_monitor.get_position().to_logical(monitor_dpi_factor)
+			} else {
+				self.pre_full_screen_pos
+			});
+		}
+
+		// Main game logic
 		let tube_count = self.tubes.len();
 		let max_cols = ((self.width - SCREEN_MARGIN * 2.0 + TUBE_MARGIN) / (TUBE_WIDTH + TUBE_MARGIN)).floor();
 		let cols = (tube_count as f32 / self.tubes_factor as f32).ceil().min(max_cols).max(1.0);
@@ -367,7 +243,7 @@ impl EventHandler for MainState {
 		let rows = (tube_count as f32 / cols).ceil();
 		let total_h = rows * (self.tube_capacity * TUBE_WIDTH + TUBE_MARGIN);
 
-		let mousedown = ggez::input::mouse::button_pressed(ctx, MouseButton::Left);
+		let mousedown = input::mouse::button_pressed(ctx, MouseButton::Left);
 
 		for i in 0..tube_count {
 			let (tubes_before, tubes_after) = self.tubes.split_at_mut(i);
@@ -380,59 +256,65 @@ impl EventHandler for MainState {
 			tube.dimensions.x = SCREEN_MARGIN + (self.width - SCREEN_MARGIN * 2.0) / 2.0 - total_w / 2.0 + (tube.dimensions.w + TUBE_MARGIN) * (i as f32 % cols).floor();
 			tube.dimensions.y = SCREEN_MARGIN + (self.height - SCREEN_MARGIN * 2.0 + TUBE_MARGIN) / 2.0 - total_h / 2.0 + (tube.dimensions.h + TUBE_MARGIN) * (i as f32 / cols).floor();
 
-			// Detect hover
-			let hovered = self.mouse_x >= tube.dimensions.x &&
-				self.mouse_x <= tube.dimensions.x + tube.dimensions.w &&
-				self.mouse_y >= tube.dimensions.y &&
-				self.mouse_y <= tube.dimensions.y + tube.dimensions.h;
+			if !self.menu_state.show_settings {
+				// Detect hover
+				let hovered = self.mouse_pos.x >= tube.dimensions.x &&
+					self.mouse_pos.x <= tube.dimensions.x + tube.dimensions.w &&
+					self.mouse_pos.y >= tube.dimensions.y &&
+					self.mouse_pos.y <= tube.dimensions.y + tube.dimensions.h;
 
-			// Store previous mouse states
-			let has_selected_tube = self.selected_tube.is_some();
-			let is_selected_tube = has_selected_tube && self.selected_tube.unwrap() == i;
-			let was_mousedown = tube.mousedown && !mousedown;
-			let was_clicked = was_mousedown && hovered;
+				// Store previous mouse states
+				let has_selected_tube = self.selected_tube.is_some();
+				let is_selected_tube = has_selected_tube && self.selected_tube.unwrap() == i;
+				let was_mousedown = tube.mousedown && !mousedown;
+				let was_clicked = was_mousedown && hovered;
 
-			// Detect mouse states
-			tube.mousedown = mousedown && (tube.mousedown || tube.hovered);
-			tube.mouseup = is_selected_tube || was_clicked;
-			tube.hovered = !mousedown && hovered;
+				// Detect mouse states
+				tube.mousedown = mousedown && (tube.mousedown || tube.hovered);
+				tube.clicked = is_selected_tube || was_clicked;
+				tube.hovered = !mousedown && hovered;
 
-			// Handle click
-			if is_selected_tube && was_clicked {
-				// Deselect current tube
-				self.selected_tube = None;
-			} else if tube.mouseup && has_selected_tube && !is_selected_tube {
-				// Get previously selected tube
-				let prev_i = self.selected_tube.unwrap();
-				let prev_tube = if prev_i < i {
-					&mut tubes_before[prev_i]
-				} else {
-					&mut tubes_after[prev_i - i - 1]
-				};
+				// Handle click
+				if is_selected_tube && was_clicked {
+					// Deselect current tube
+					self.selected_tube = None;
+				} else if tube.clicked && has_selected_tube && !is_selected_tube {
+					// Get previously selected tube
+					let prev_i = self.selected_tube.unwrap();
+					let prev_tube = if prev_i < i {
+						&mut tubes_before[prev_i]
+					} else {
+						&mut tubes_after[prev_i - i - 1]
+					};
 
-				// Attempt to move color from previously selected
-				// to newly selected tube
-				if let Some(content) = prev_tube.drain(tube.remaining_capacity()) {
-					// println!("drain {:?}", content);
-					if let Some(content) = tube.fill(content) {
-						// Color doesn't match, put the color back into the previous tube
-						// println!("could not fill {:?} with drained content", tube);
-						prev_tube.fill_unchecked(content);
+					// Attempt to move color from previously selected
+					// to newly selected tube
+					if let Some(content) = prev_tube.drain(tube.remaining_capacity()) {
+						// println!("drain {:?}", content);
+						if let Some(content) = tube.fill(content) {
+							// Color doesn't match, put the color back into the previous tube
+							// println!("could not fill {:?} with drained content", tube);
+							prev_tube.fill_unchecked(content);
+						}
 					}
-				}
 
-				// Deselect previously selected tube
-				self.selected_tube = None;
-			} else if tube.mouseup && !has_selected_tube {
-				// Select current tube
-				self.selected_tube = Some(i);
+					// Deselect previously selected tube
+					self.selected_tube = None;
+				} else if tube.clicked && !has_selected_tube {
+					// Select current tube
+					self.selected_tube = Some(i);
+				}
 			}
 		}
+
 		Ok(())
 	}
 
 	fn draw(&mut self, ctx: &mut Context) -> GameResult<()> {
 		graphics::clear(ctx, COLOR_BG);
+
+		let complete_pct = self.complete_pct();
+		let (width, height) = (self.width, self.height);
 
 		// Draw tubes
 		let param = DrawParam::default();
@@ -441,25 +323,83 @@ impl EventHandler for MainState {
 		}
 
 		// Draw total completed text
-		let mut pcttext = Text::new(format!("Level 1 ({}% completed)", (self.complete_pct() * 100.0).floor()));
+		let completed_color = if complete_pct == 1.0 {
+			COLOR_LIGHTGREEN
+		} else if complete_pct >= 0.75 {
+			COLOR_CYAN
+		} else if complete_pct >= 0.5 {
+			COLOR_YELLOW
+		} else if complete_pct >= 0.25 {
+			COLOR_ORANGE
+		} else {
+			COLOR_RED
+		};
+		let mut pcttext = Text::new(format!("Level {} (", self.level));
+		pcttext.add(TextFragment::new(format!("{}% completed", (complete_pct * 100.0).floor())).color(completed_color));
+		pcttext.add(TextFragment::new(")"));
 		pcttext.set_font(self.font, Scale::uniform(18.0));
-		// let pcttext_h = pcttext.height(ctx) as f32;
 		let pcttext_w = pcttext.width(ctx) as f32;
-		graphics::queue_text(ctx, &pcttext, Point2::new(self.width / 2.0 - pcttext_w / 2.0, SCREEN_MARGIN), Some(graphics::WHITE));
+		graphics::queue_text(ctx, &pcttext, Point2::new(width / 2.0 - pcttext_w / 2.0, SCREEN_MARGIN), Some(graphics::WHITE));
 
+		// Draw all queued text
 		graphics::draw_queued_text(ctx, param, None, graphics::FilterMode::Linear)?;
 
 		// Draw UI
-		self.imgui_wrapper.render(ctx, self.hidpi_factor, move |_ui| {
+		self.imgui_wrapper.render(ctx, self.hidpi_factor, &mut self.menu_state, move |ui, state| {
+			// Top/main menu bar
+			if let Some(menu_bar) = ui.begin_main_menu_bar() {
+				if let Some(game_menu) = ui.begin_menu(im_str!("Game"), true) {
+					let item = MenuItem::new(im_str!("Settings"));
+					if item.build(ui) {
+						state.show_settings = true;
+					}
+
+					let item = MenuItem::new(im_str!("Exit game"));
+					state.quit = item.build(ui);
+
+					game_menu.end(ui);
+				}
+
+				if let Some(level_menu) = ui.begin_menu(im_str!("Level"), true) {
+					let item = MenuItem::new(if complete_pct == 1.0 {
+						im_str!("Next level")
+					} else {
+						im_str!("Skip level")
+					});
+					state.skip_level = item.build(ui);
+
+					level_menu.end(ui);
+				}
+
+				menu_bar.end(ui);
+			}
+
+			// Settings window
+			if state.show_settings {
+				if let Some(settings_window) = {
+					let window_w = 300.0;
+					let window_h = window_w * 1.25;
+					Window::new(im_str!("Settings"))
+						.size([window_w, window_h], Condition::Appearing)
+						.position([width / 2.0 - window_w / 2.0, height / 2.0 - window_h / 2.0], Condition::Appearing)
+						.opened(&mut state.show_settings)
+						.collapsible(false)
+						.focused(true)
+						.begin(ui)
+				} {
+					state.full_screen_changed = ui.checkbox(im_str!("Fullscreen"), &mut state.settings.full_screen);
+
+					settings_window.end(ui);
+				}
+			}
 		}).expect("renderer error");
 
-		graphics::present(ctx)?;
-		Ok(())
+		graphics::present(ctx)
 	}
 
 	fn mouse_motion_event(&mut self, _ctx: &mut Context, x: f32, y: f32, _dx: f32, _dy: f32) {
-		self.mouse_x = x;
-		self.mouse_y = y;
+		self.mouse_pos.x = x;
+		self.mouse_pos.y = y;
 		self.imgui_wrapper.update_mouse_pos(x, y);
 	}
 
@@ -494,12 +434,13 @@ impl EventHandler for MainState {
 	}
 }
 
-fn main() -> ggez::GameResult {
-	let cb = ggez::ContextBuilder::new("Color sorting game", "alexrsagen")
+fn main() -> GameResult {
+	let cb = ContextBuilder::new("Color sorting game", "alexrsagen")
 		.window_setup(conf::WindowSetup::default()
 			.title("Color sorting game")
 			.srgb(true)
 			.vsync(true)
+			.samples(NumSamples::Eight)
 		).window_mode(conf::WindowMode::default()
 			// .fullscreen_type(conf::FullscreenType::Desktop)
 			// .maximized(true)

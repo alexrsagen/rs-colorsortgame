@@ -6,6 +6,7 @@ edition = "2018"
 
 [dependencies]
 ggez = "^0.5"
+winit = "^0.19"
 
 gfx_core = "^0.9"
 gfx_device_gl = "^0.16"
