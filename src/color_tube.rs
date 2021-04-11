@@ -1,5 +1,6 @@
 use ggez::{nalgebra, Context, GameResult};
 use ggez::graphics::{self, Drawable, Font, Color, Scale, Mesh, DrawMode, DrawParam, BlendMode, Rect, Text};
+use ggez::event::KeyCode;
 use nalgebra::Point2;
 use crate::colors::*;
 
@@ -22,6 +23,7 @@ pub struct ColorTube {
 	pub clicked: bool,
 	pub dimensions: Rect,
 	pub capacity: f32,
+	pub keycode: Option<KeyCode>,
 	contents: Vec<ColorTubeContent>,
 	font: Font,
 }
@@ -34,6 +36,7 @@ impl ColorTube {
 			clicked: false,
 			dimensions: Rect::new(0.0, 0.0, 50.0, 50.0 * capacity),
 			capacity,
+			keycode: None,
 			contents,
 			font
 		}
@@ -203,12 +206,53 @@ impl Drawable for ColorTube {
 		border_points.push(Point2::new(self.dimensions.x + w_scaled, self.dimensions.y));
 		Mesh::new_polygon(ctx, DrawMode::stroke(2.0), &border_points, color_border)?.draw(ctx, param)?;
 
+		// Draw keycode text
+		if let Some(keycode) = self.keycode {
+			let keystr = match keycode {
+				KeyCode::Key1 => "1",
+				KeyCode::Key2 => "2",
+				KeyCode::Key3 => "3",
+				KeyCode::Key4 => "4",
+				KeyCode::Key5 => "5",
+				KeyCode::Key6 => "6",
+				KeyCode::Key7 => "7",
+				KeyCode::Q => "Q",
+				KeyCode::W => "W",
+				KeyCode::E => "E",
+				KeyCode::R => "R",
+				KeyCode::T => "T",
+				KeyCode::Y => "Y",
+				KeyCode::U => "U",
+				KeyCode::A => "A",
+				KeyCode::S => "S",
+				KeyCode::D => "D",
+				KeyCode::F => "F",
+				KeyCode::G => "G",
+				KeyCode::H => "H",
+				KeyCode::J => "J",
+				KeyCode::Z => "Z",
+				KeyCode::X => "X",
+				KeyCode::C => "C",
+				KeyCode::V => "V",
+				KeyCode::B => "B",
+				KeyCode::N => "N",
+				KeyCode::M => "M",
+				_ => "",
+			};
+			if keystr.len() > 0 {
+				let mut keytext = Text::new(keystr);
+				keytext.set_font(self.font, Scale::uniform(18.0));
+				let keytext_h = keytext.height(ctx) as f32;
+				graphics::queue_text(ctx, &keytext, Point2::new(self.dimensions.x, self.dimensions.y - keytext_h), Some(COLOR_YELLOW));
+			}
+		}
+
 		// Draw completed text
 		let mut pcttext = Text::new(format!("{}%", (self.complete_pct() * 100.0).floor()));
 		pcttext.set_font(self.font, Scale::uniform(18.0));
 		let pcttext_h = pcttext.height(ctx) as f32;
 		let pcttext_w = pcttext.width(ctx) as f32;
-		graphics::queue_text(ctx, &pcttext, Point2::new(self.dimensions.x + (self.dimensions.w / 2.0 - pcttext_w / 2.0), self.dimensions.y - pcttext_h), Some(color_border));
+		graphics::queue_text(ctx, &pcttext, Point2::new(self.dimensions.x + (self.dimensions.w - pcttext_w), self.dimensions.y - pcttext_h), Some(color_border));
 
 		Ok(())
 	}

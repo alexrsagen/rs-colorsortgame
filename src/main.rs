@@ -13,12 +13,14 @@ use ggez::event::{self, EventHandler, KeyCode, KeyMods, MouseButton};
 use ggez::graphics::{self, Drawable, Font, Scale, DrawParam, Text, TextFragment};
 use nalgebra::Point2;
 use rand::seq::SliceRandom;
-use rand::thread_rng;
+use rand::SeedableRng;
+use rand::rngs::SmallRng;
 use crate::imgui_wrapper::ImGuiWrapper;
 use crate::colors::*;
 use crate::color_tube::{ColorTube, ColorTubeContent};
 
 // TODO: persist settings on filesystem
+// TODO: persist level on filesystem
 
 fn smallest_factor(mut n: usize) -> usize {
 	let mut out = vec![];
@@ -39,6 +41,15 @@ const TUBE_WIDTH: f32 = 50.0;
 const SCREEN_MARGIN: f32 = 50.0;
 const TUBE_MARGIN: f32 = 25.0;
 
+const KEYMAP_COLS: usize = 7;
+const KEYMAP_ROWS: usize = 4;
+const KEYMAP: [KeyCode; KEYMAP_COLS * KEYMAP_ROWS] = [
+	KeyCode::Key1, KeyCode::Key2, KeyCode::Key3, KeyCode::Key4, KeyCode::Key5, KeyCode::Key6, KeyCode::Key7,
+	KeyCode::Q, KeyCode::W, KeyCode::E, KeyCode::R, KeyCode::T, KeyCode::Y, KeyCode::U,
+	KeyCode::A, KeyCode::S, KeyCode::D, KeyCode::F, KeyCode::G, KeyCode::H, KeyCode::J,
+	KeyCode::Z, KeyCode::X, KeyCode::C, KeyCode::V, KeyCode::B, KeyCode::N, KeyCode::M
+];
+
 struct Settings {
 	full_screen: bool,
 }
@@ -55,6 +66,7 @@ pub struct MenuState {
 	settings: Settings,
 	show_settings: bool,
 	full_screen_changed: bool,
+	restart_level: bool,
 	skip_level: bool,
 	quit: bool,
 }
@@ -65,6 +77,7 @@ impl MenuState {
 			settings: Settings::new(),
 			full_screen_changed: false,
 			show_settings: false,
+			restart_level: false,
 			skip_level: false,
 			quit: false,
 		}
@@ -138,7 +151,7 @@ impl MainState {
 			ColorTube::new(self.tube_capacity, vec![ColorTubeContent::new(COLOR_ORANGE, self.tube_capacity)], self.font),
 			ColorTube::new(self.tube_capacity, vec![ColorTubeContent::new(COLOR_RED, self.tube_capacity)], self.font),
 		];
-		let mut rng = thread_rng();
+		let mut rng = SmallRng::seed_from_u64(self.level as u64);
 		tubes_src.shuffle(&mut rng);
 
 		let mut tubes = Vec::<ColorTube>::with_capacity(tubes_src.len());
@@ -181,6 +194,88 @@ impl MainState {
 		self.level += 1;
 		self.new_tubes();
 	}
+
+	fn handle_tube_activation(&mut self, tube_index: usize) {
+		if tube_index >= self.tubes.len() {
+			return;
+		}
+		if self.menu_state.show_settings {
+			return;
+		}
+
+		let (tubes_before, tubes_after) = self.tubes.split_at_mut(tube_index);
+		let tubes_after = tubes_after.split_first_mut();
+		let (tube, tubes_after) = tubes_after.unwrap();
+
+		let has_selected_tube = self.selected_tube.is_some();
+		let is_selected_tube = has_selected_tube && self.selected_tube.unwrap() == tube_index;
+
+		if is_selected_tube {
+			// Deselect current tube
+			self.selected_tube = None;
+		} else if has_selected_tube && !is_selected_tube {
+			// Get previously selected tube
+			let prev_tube_index = self.selected_tube.unwrap();
+			let prev_tube = if prev_tube_index < tube_index {
+				&mut tubes_before[prev_tube_index]
+			} else {
+				&mut tubes_after[prev_tube_index - tube_index - 1]
+			};
+
+			// Attempt to move color from previously selected
+			// to newly selected tube
+			if let Some(content) = prev_tube.drain(tube.remaining_capacity()) {
+				// println!("drain {:?}", content);
+				if let Some(content) = tube.fill(content) {
+					// Color doesn't match, put the color back into the previous tube
+					// println!("could not fill {:?} with drained content", tube);
+					prev_tube.fill_unchecked(content);
+				}
+			}
+
+			// Deselect previously selected tube
+			self.selected_tube = None;
+		} else if !has_selected_tube {
+			// Select current tube
+			self.selected_tube = Some(tube_index);
+		}
+	}
+
+	fn cols(&self) -> usize {
+		let tube_count = self.tubes.len();
+		let max_cols = ((self.width - SCREEN_MARGIN * 2.0 + TUBE_MARGIN) / (TUBE_WIDTH + TUBE_MARGIN)).floor();
+		(tube_count as f32 / self.tubes_factor as f32).ceil().min(max_cols).max(1.0) as usize
+	}
+
+	fn rows(&self) -> usize {
+		(self.tubes.len() as f32 / self.cols() as f32).ceil() as usize
+	}
+
+	fn keymap_key_to_index(&self, keycode: KeyCode) -> Option<usize> {
+		if let Some(index) = KEYMAP.iter().position(|&v| v == keycode) {
+			let (cols, rows) = (self.cols(), self.rows());
+			let row = index / KEYMAP_COLS;
+			let col = index % KEYMAP_COLS;
+			if col >= cols || row >= rows {
+				None
+			} else {
+				Some(row*cols + col)
+			}
+		} else {
+			None
+		}
+	}
+
+	fn keymap_index_to_key(&self, index: usize) -> Option<KeyCode> {
+		let cols = self.cols();
+		let row = index / cols;
+		let col = index % cols;
+		if col >= KEYMAP_COLS || row >= KEYMAP_ROWS {
+			None
+		} else {
+			Some(KEYMAP[row*KEYMAP_COLS + col])
+		}
+	}
 }
 
 impl EventHandler for MainState {
@@ -190,6 +285,10 @@ impl EventHandler for MainState {
 			self.menu_state.quit = false;
 			event::quit(ctx);
 			return Ok(());
+		}
+		if self.menu_state.restart_level {
+			self.menu_state.restart_level = false;
+			self.new_tubes();
 		}
 		if self.menu_state.skip_level {
 			self.menu_state.skip_level = false;
@@ -235,26 +334,25 @@ impl EventHandler for MainState {
 		}
 
 		// Main game logic
-		let tube_count = self.tubes.len();
-		let max_cols = ((self.width - SCREEN_MARGIN * 2.0 + TUBE_MARGIN) / (TUBE_WIDTH + TUBE_MARGIN)).floor();
-		let cols = (tube_count as f32 / self.tubes_factor as f32).ceil().min(max_cols).max(1.0);
+			let (cols, rows) = (self.cols() as f32, self.rows() as f32);
 		let total_w = cols * (TUBE_WIDTH + TUBE_MARGIN) - TUBE_MARGIN;
-
-		let rows = (tube_count as f32 / cols).ceil();
 		let total_h = rows * (self.tube_capacity * TUBE_WIDTH + TUBE_MARGIN);
 
 		let mousedown = input::mouse::button_pressed(ctx, MouseButton::Left);
 
-		for i in 0..tube_count {
-			let (tubes_before, tubes_after) = self.tubes.split_at_mut(i);
-			let tubes_after = tubes_after.split_first_mut();
-			let (tube, tubes_after) = tubes_after.unwrap();
+		let mut clicked_tube: Option<usize> = None;
+		for i in 0..self.tubes.len() {
+			let keycode = self.keymap_index_to_key(i);
+			let tube = &mut self.tubes[i];
 
 			// Update dimensions
 			tube.dimensions.w = TUBE_WIDTH;
 			tube.dimensions.h = tube.dimensions.w * tube.capacity;
 			tube.dimensions.x = SCREEN_MARGIN + (self.width - SCREEN_MARGIN * 2.0) / 2.0 - total_w / 2.0 + (tube.dimensions.w + TUBE_MARGIN) * (i as f32 % cols).floor();
 			tube.dimensions.y = SCREEN_MARGIN + (self.height - SCREEN_MARGIN * 2.0 + TUBE_MARGIN) / 2.0 - total_h / 2.0 + (tube.dimensions.h + TUBE_MARGIN) * (i as f32 / cols).floor();
+
+			// Update keycode
+			tube.keycode = keycode;
 
 			if !self.menu_state.show_settings {
 				// Detect hover
@@ -263,48 +361,19 @@ impl EventHandler for MainState {
 					self.mouse_pos.y >= tube.dimensions.y &&
 					self.mouse_pos.y <= tube.dimensions.y + tube.dimensions.h;
 
-				// Store previous mouse states
-				let has_selected_tube = self.selected_tube.is_some();
-				let is_selected_tube = has_selected_tube && self.selected_tube.unwrap() == i;
-				let was_mousedown = tube.mousedown && !mousedown;
-				let was_clicked = was_mousedown && hovered;
-
-				// Detect mouse states
-				tube.mousedown = mousedown && (tube.mousedown || tube.hovered);
-				tube.clicked = is_selected_tube || was_clicked;
-				tube.hovered = !mousedown && hovered;
-
-				// Handle click
-				if is_selected_tube && was_clicked {
-					// Deselect current tube
-					self.selected_tube = None;
-				} else if tube.clicked && has_selected_tube && !is_selected_tube {
-					// Get previously selected tube
-					let prev_i = self.selected_tube.unwrap();
-					let prev_tube = if prev_i < i {
-						&mut tubes_before[prev_i]
-					} else {
-						&mut tubes_after[prev_i - i - 1]
-					};
-
-					// Attempt to move color from previously selected
-					// to newly selected tube
-					if let Some(content) = prev_tube.drain(tube.remaining_capacity()) {
-						// println!("drain {:?}", content);
-						if let Some(content) = tube.fill(content) {
-							// Color doesn't match, put the color back into the previous tube
-							// println!("could not fill {:?} with drained content", tube);
-							prev_tube.fill_unchecked(content);
-						}
-					}
-
-					// Deselect previously selected tube
-					self.selected_tube = None;
-				} else if tube.clicked && !has_selected_tube {
-					// Select current tube
-					self.selected_tube = Some(i);
+				// Update mouse states
+				let is_selected_tube = self.selected_tube.is_some() && self.selected_tube.unwrap() == i;
+				let tube_clicked = hovered && tube.mousedown && !mousedown;
+				if tube_clicked {
+					clicked_tube = Some(i);
 				}
+				tube.mousedown = mousedown && (tube.mousedown || tube.hovered);
+				tube.clicked = is_selected_tube || tube_clicked;
+				tube.hovered = !mousedown && hovered;
 			}
+		}
+		if let Some(clicked_tube_index) = clicked_tube {
+			self.handle_tube_activation(clicked_tube_index);
 		}
 
 		Ok(())
@@ -354,19 +423,26 @@ impl EventHandler for MainState {
 						state.show_settings = true;
 					}
 
-					let item = MenuItem::new(im_str!("Exit game"));
+					let item = MenuItem::new(im_str!("Exit game")).shortcut(im_str!("Ctrl + Q"));
 					state.quit = item.build(ui);
 
 					game_menu.end(ui);
 				}
 
 				if let Some(level_menu) = ui.begin_menu(im_str!("Level"), true) {
-					let item = MenuItem::new(if complete_pct == 1.0 {
-						im_str!("Next level")
-					} else {
-						im_str!("Skip level")
-					});
-					state.skip_level = item.build(ui);
+					let item = MenuItem::new(im_str!("Restart level"))
+						.shortcut(im_str!("Ctrl + R"));
+					state.restart_level = item.build(ui);
+
+					let item = MenuItem::new(im_str!("Next level"))
+						.shortcut(im_str!("Ctrl + N"))
+						.enabled(complete_pct == 1.0);
+					let next_level = item.build(ui);
+
+					let item = MenuItem::new(im_str!("Skip level"));
+					let skip_level = item.build(ui);
+
+					state.skip_level = next_level || skip_level;
 
 					level_menu.end(ui);
 				}
@@ -416,6 +492,19 @@ impl EventHandler for MainState {
 	}
 
 	fn key_up_event(&mut self, _ctx: &mut Context, keycode: KeyCode, keymods: KeyMods) {
+		if keymods.contains(KeyMods::CTRL) {
+			if keycode == KeyCode::Q {
+				self.menu_state.quit = true;
+			} else if keycode == KeyCode::R {
+				self.menu_state.restart_level = true;
+			} else if keycode == KeyCode::N && self.complete_pct() == 1.0 {
+				self.menu_state.skip_level = true;
+			}
+		} else if keymods.is_empty() {
+			if let Some(tube_index) = self.keymap_key_to_index(keycode) {
+				self.handle_tube_activation(tube_index);
+			}
+		}
 		self.imgui_wrapper.update_key_up(keycode, keymods);
 	}
 

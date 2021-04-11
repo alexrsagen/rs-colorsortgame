@@ -14,4 +14,4 @@ gfx_device_gl = "^0.16"
 imgui = "^0.7"
 imgui-gfx-renderer = "^0.7"
 
-rand = "^0.8"
+rand = { version = "^0.8", features = ["small_rng"] }
